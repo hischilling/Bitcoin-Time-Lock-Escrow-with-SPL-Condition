@@ -155,3 +155,161 @@
     false
   )
 )
+
+;; Claim escrow by providing the secret preimage
+(define-public (claim-escrow (escrow-id uint) (secret (buff 32)))
+  (let
+    (
+      (escrow-opt (map-get? escrows { escrow-id: escrow-id }))
+    )
+    (begin
+      ;; Check if escrow exists
+      (asserts! (is-some escrow-opt) ERR-ESCROW-NOT-FOUND)
+      
+      (match escrow-opt
+        escrow-data
+        (begin
+          ;; Only recipient can claim
+          (asserts! (is-eq tx-sender (get recipient escrow-data)) ERR-NOT-AUTHORIZED)
+          
+          ;; Escrow must not be already claimed or refunded
+          (asserts! (not (get is-claimed escrow-data)) ERR-ESCROW-ALREADY-CLAIMED)
+          (asserts! (not (get is-refunded escrow-data)) ERR-ESCROW-ALREADY-CLAIMED)
+          
+          ;; Bitcoin height must be reached
+          (asserts! (>= burn-block-height (get bitcoin-unlock-height escrow-data)) ERR-BITCOIN-HEIGHT-NOT-REACHED)
+          
+          ;; Validate secret against stored hash
+          (asserts! (validate-secret secret (get secret-hash escrow-data)) ERR-INVALID-SECRET)
+          
+          ;; Transfer STX to recipient
+          (try! (as-contract (stx-transfer? (get amount escrow-data) tx-sender (get recipient escrow-data))))
+          
+          ;; Mark as claimed
+          (map-set escrows
+            { escrow-id: escrow-id }
+            (merge escrow-data { is-claimed: true })
+          )
+          
+          (ok true)
+        )
+        ERR-ESCROW-NOT-FOUND
+      )
+    )
+  )
+)
+
+;; Refund escrow to sender if recipient doesn't claim in time
+(define-public (refund-escrow (escrow-id uint))
+  (let
+    (
+      (escrow-opt (map-get? escrows { escrow-id: escrow-id }))
+    )
+    (begin
+      ;; Check if escrow exists
+      (asserts! (is-some escrow-opt) ERR-ESCROW-NOT-FOUND)
+      
+      (match escrow-opt
+        escrow-data
+        (begin
+          ;; Only sender can refund
+          (asserts! (is-eq tx-sender (get sender escrow-data)) ERR-NOT-AUTHORIZED)
+          
+          ;; Escrow must not be already claimed or refunded
+          (asserts! (not (get is-claimed escrow-data)) ERR-ESCROW-ALREADY-CLAIMED)
+          (asserts! (not (get is-refunded escrow-data)) ERR-ESCROW-ALREADY-CLAIMED)
+          
+          ;; Bitcoin height must be reached (escrow expired)
+          (asserts! (>= burn-block-height (get bitcoin-unlock-height escrow-data)) ERR-BITCOIN-HEIGHT-NOT-REACHED)
+          
+          ;; Transfer STX back to sender
+          (try! (as-contract (stx-transfer? (get amount escrow-data) tx-sender (get sender escrow-data))))
+          
+          ;; Mark as refunded
+          (map-set escrows
+            { escrow-id: escrow-id }
+            (merge escrow-data { is-refunded: true })
+          )
+          
+          (ok true)
+        )
+        ERR-ESCROW-NOT-FOUND
+      )
+    )
+  )
+)
+
+;; Emergency function: Cancel escrow before Bitcoin height is reached (contract owner only)
+(define-public (emergency-cancel-escrow (escrow-id uint))
+  (let
+    (
+      (escrow-opt (map-get? escrows { escrow-id: escrow-id }))
+    )
+    (begin
+      ;; Only contract owner can call this
+      (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+      
+      ;; Check if escrow exists
+      (asserts! (is-some escrow-opt) ERR-ESCROW-NOT-FOUND)
+      
+      (match escrow-opt
+        escrow-data
+        (begin
+          ;; Escrow must not be already claimed or refunded
+          (asserts! (not (get is-claimed escrow-data)) ERR-ESCROW-ALREADY-CLAIMED)
+          (asserts! (not (get is-refunded escrow-data)) ERR-ESCROW-ALREADY-CLAIMED)
+          
+          ;; Can only cancel before Bitcoin height is reached
+          (asserts! (< burn-block-height (get bitcoin-unlock-height escrow-data)) ERR-ESCROW-EXPIRED)
+          
+          ;; Transfer STX back to sender
+          (try! (as-contract (stx-transfer? (get amount escrow-data) tx-sender (get sender escrow-data))))
+          
+          ;; Mark as refunded (using same flag for emergency cancellation)
+          (map-set escrows
+            { escrow-id: escrow-id }
+            (merge escrow-data { is-refunded: true })
+          )
+          
+          (ok true)
+        )
+        ERR-ESCROW-NOT-FOUND
+      )
+    )
+  )
+)
+
+;; Get escrow status summary
+(define-read-only (get-escrow-status (escrow-id uint))
+  (match (map-get? escrows { escrow-id: escrow-id })
+    escrow-data
+      (ok {
+        exists: true,
+        is-claimed: (get is-claimed escrow-data),
+        is-refunded: (get is-refunded escrow-data),
+        bitcoin-height-reached: (>= burn-block-height (get bitcoin-unlock-height escrow-data)),
+        sender: (get sender escrow-data),
+        recipient: (get recipient escrow-data),
+        amount: (get amount escrow-data)
+      })
+    (ok { 
+      exists: false,
+      is-claimed: false,
+      is-refunded: false,
+      bitcoin-height-reached: false,
+      sender: CONTRACT-OWNER,
+      recipient: CONTRACT-OWNER,
+      amount: u0
+    })
+  )
+)
+
+;; Get contract statistics
+(define-read-only (get-contract-stats)
+  {
+    total-escrows: (var-get total-escrows),
+    contract-balance: (stx-get-balance (as-contract tx-sender)),
+    current-bitcoin-height: burn-block-height,
+    contract-owner: CONTRACT-OWNER
+  }
+)
