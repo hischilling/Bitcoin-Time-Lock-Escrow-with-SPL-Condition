@@ -238,3 +238,78 @@
     )
   )
 )
+
+;; Emergency function: Cancel escrow before Bitcoin height is reached (contract owner only)
+(define-public (emergency-cancel-escrow (escrow-id uint))
+  (let
+    (
+      (escrow-opt (map-get? escrows { escrow-id: escrow-id }))
+    )
+    (begin
+      ;; Only contract owner can call this
+      (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+      
+      ;; Check if escrow exists
+      (asserts! (is-some escrow-opt) ERR-ESCROW-NOT-FOUND)
+      
+      (match escrow-opt
+        escrow-data
+        (begin
+          ;; Escrow must not be already claimed or refunded
+          (asserts! (not (get is-claimed escrow-data)) ERR-ESCROW-ALREADY-CLAIMED)
+          (asserts! (not (get is-refunded escrow-data)) ERR-ESCROW-ALREADY-CLAIMED)
+          
+          ;; Can only cancel before Bitcoin height is reached
+          (asserts! (< burn-block-height (get bitcoin-unlock-height escrow-data)) ERR-ESCROW-EXPIRED)
+          
+          ;; Transfer STX back to sender
+          (try! (as-contract (stx-transfer? (get amount escrow-data) tx-sender (get sender escrow-data))))
+          
+          ;; Mark as refunded (using same flag for emergency cancellation)
+          (map-set escrows
+            { escrow-id: escrow-id }
+            (merge escrow-data { is-refunded: true })
+          )
+          
+          (ok true)
+        )
+        ERR-ESCROW-NOT-FOUND
+      )
+    )
+  )
+)
+
+;; Get escrow status summary
+(define-read-only (get-escrow-status (escrow-id uint))
+  (match (map-get? escrows { escrow-id: escrow-id })
+    escrow-data
+      (ok {
+        exists: true,
+        is-claimed: (get is-claimed escrow-data),
+        is-refunded: (get is-refunded escrow-data),
+        bitcoin-height-reached: (>= burn-block-height (get bitcoin-unlock-height escrow-data)),
+        sender: (get sender escrow-data),
+        recipient: (get recipient escrow-data),
+        amount: (get amount escrow-data)
+      })
+    (ok { 
+      exists: false,
+      is-claimed: false,
+      is-refunded: false,
+      bitcoin-height-reached: false,
+      sender: CONTRACT-OWNER,
+      recipient: CONTRACT-OWNER,
+      amount: u0
+    })
+  )
+)
+
+;; Get contract statistics
+(define-read-only (get-contract-stats)
+  {
+    total-escrows: (var-get total-escrows),
+    contract-balance: (stx-get-balance (as-contract tx-sender)),
+    current-bitcoin-height: burn-block-height,
+    contract-owner: CONTRACT-OWNER
+  }
+)
