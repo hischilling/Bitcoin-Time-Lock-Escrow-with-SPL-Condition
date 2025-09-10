@@ -58,4 +58,100 @@
 )
 
 ;; public functions
-;;
+
+;; Create a new escrow with time lock and secret hash condition
+(define-public (create-escrow 
+  (recipient principal) 
+  (amount uint) 
+  (blocks-ahead uint) 
+  (secret-hash (buff 32)))
+  (let
+    (
+      (escrow-id (get-next-escrow-id))
+      (bitcoin-height (convert-to-bitcoin-height blocks-ahead))
+    )
+    (begin
+      ;; Validate inputs
+      (asserts! (> amount u0) ERR-AMOUNT-MUST-BE-POSITIVE)
+      (asserts! (> blocks-ahead u0) ERR-INVALID-BITCOIN-HEIGHT)
+      (asserts! (>= (stx-get-balance tx-sender) amount) ERR-INSUFFICIENT-BALANCE)
+      
+      ;; Check escrow doesn't already exist for this ID
+      (asserts! (is-none (map-get? escrows { escrow-id: escrow-id })) ERR-ESCROW-ALREADY-EXISTS)
+      
+      ;; Transfer STX to contract
+      (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+      
+      ;; Create escrow record
+      (map-set escrows 
+        { escrow-id: escrow-id }
+        {
+          sender: tx-sender,
+          recipient: recipient,
+          amount: amount,
+          bitcoin-unlock-height: bitcoin-height,
+          secret-hash: secret-hash,
+          is-claimed: false,
+          is-refunded: false,
+          created-at-height: block-height
+        }
+      )
+      
+      ;; Update counters
+      (var-set total-escrows (+ (var-get total-escrows) u1))
+      
+      ;; Return escrow ID
+      (ok escrow-id)
+    )
+  )
+)
+
+;; Get escrow details by ID
+(define-read-only (get-escrow (escrow-id uint))
+  (map-get? escrows { escrow-id: escrow-id })
+)
+
+;; Get total number of escrows created
+(define-read-only (get-total-escrows)
+  (var-get total-escrows)
+)
+
+;; Check if Bitcoin unlock height has been reached
+(define-read-only (is-bitcoin-height-reached (escrow-id uint))
+  (match (map-get? escrows { escrow-id: escrow-id })
+    escrow-data 
+      (>= burn-block-height (get bitcoin-unlock-height escrow-data))
+    false
+  )
+)
+
+;; Validate secret preimage against stored hash
+(define-private (validate-secret (secret (buff 32)) (expected-hash (buff 32)))
+  (is-eq (sha256 secret) expected-hash)
+)
+
+;; Check if escrow can be claimed by recipient
+(define-read-only (can-claim-escrow (escrow-id uint))
+  (match (map-get? escrows { escrow-id: escrow-id })
+    escrow-data
+      (and 
+        (not (get is-claimed escrow-data))
+        (not (get is-refunded escrow-data))
+        (>= burn-block-height (get bitcoin-unlock-height escrow-data))
+      )
+    false
+  )
+)
+
+;; Check if escrow can be refunded by sender  
+(define-read-only (can-refund-escrow (escrow-id uint))
+  (match (map-get? escrows { escrow-id: escrow-id })
+    escrow-data
+      (and 
+        (not (get is-claimed escrow-data))
+        (not (get is-refunded escrow-data))
+        (>= burn-block-height (get bitcoin-unlock-height escrow-data))
+      )
+    false
+  )
+)
